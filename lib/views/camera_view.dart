@@ -5,10 +5,12 @@ import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_tflite/flutter_tflite.dart';
 import 'package:google_ml_kit/google_ml_kit.dart';
 import 'package:intellizoom/views/view_pictures.dart';
 
 import 'package:path_provider/path_provider.dart';
+
 import '../main.dart';
 import '../constant/constants.dart';
 import 'gallery_view.dart';
@@ -27,15 +29,15 @@ class _CameraPageState extends State<CameraPage>
   bool _isCameraInitialized = false;
   ResolutionPreset currentResolution = ResolutionPreset.max;
 
-  List<DetectedObject> detectedObjects = [];
   String output = '';
   String label = '';
+  List? _recognitions = [];
   bool isRearCamera = true;
   double currentZoomLevel = 1.0;
   double maxZoom = 1.0;
   bool canStartStream = false;
   FlashMode? _currentFlashMode;
-  File? _imageFile;
+  File? _cameraImageFile;
   List<DetectedObject>? objects;
   int currIconPosition = -1;
   bool canAutoFocus = false;
@@ -52,6 +54,7 @@ class _CameraPageState extends State<CameraPage>
   @override
   void initState() {
     initCamera(cameras[0]);
+    loadModel();
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
@@ -94,6 +97,7 @@ class _CameraPageState extends State<CameraPage>
       cameraController.dispose();
     } else if (state == AppLifecycleState.resumed) {
       initCamera(_cameraController!.description);
+      loadModel();
     }
   }
 
@@ -175,39 +179,59 @@ class _CameraPageState extends State<CameraPage>
     }
   }
 
+  Future<void> loadModel() async {
+    // Tflite.close();
+    await Tflite.loadModel(
+            model: 'assets/ssd_mobilenet.tflite',
+            labels: 'assets/labels.txt',
+            numThreads: 1, // defaults to 1
+            isAsset:
+                true, // defaults to true, set to false to load resources outside assets
+            useGpuDelegate:
+                false // defaults to false, set to true to use GPU delegate
+            )
+        .then((result) {});
+  }
+
   void detectObjectOnCamera() async {
-    final inputImage = InputImage.fromBytes(
-      bytes: _concatenatePlanes(_cameraImage!.planes),
-      inputImageData: InputImageData(
-        planeData: _cameraImage!.planes.map(
-          (Plane plane) {
-            return InputImagePlaneMetadata(
-              bytesPerRow: plane.bytesPerRow,
-              height: plane.height,
-              width: plane.width,
-            );
-          },
-        ).toList(),
-        inputImageFormat: InputImageFormat.yuv420,
-        size: Size(
-            _cameraImage!.width.toDouble(), _cameraImage!.height.toDouble()),
-        imageRotation: InputImageRotation.rotation90deg,
-      ),
-    );
-    final objectDetector = GoogleMlKit.vision.objectDetector(
-        options: ObjectDetectorOptions(
-            mode: DetectionMode.single,
-            classifyObjects: true,
-            multipleObjects: true));
+    Tflite.detectObjectOnFrame(
+            bytesList: _cameraImage!.planes.map((plane) {
+              return plane.bytes;
+            }).toList(), // required
+            model: "SSDMobileNet",
+            imageHeight: _cameraImage!.height,
+            imageWidth: _cameraImage!.width,
+            imageMean: 127.5, // defaults to 127.5
+            imageStd: 127.5, // defaults to 127.5
+            rotation: 90, // defaults to 90, Android only
+            numResultsPerClass: 5, // defaults to 5
+            threshold: 0.3, // defaults to 0.1
+            asynch: true // defaults to true
+            )
+        .then((recognitions) {
+      // setState(() {});
 
-    objects = await objectDetector.processImage(inputImage);
+      isDetectingObjects = false;
 
-    if (objects!.isNotEmpty) {
+      // print(recognitions.runtimeType);   // List<Object?>
+
       setState(() {
-        output = "Object detected";
-        detectedObjects = objects!;
+        _recognitions = recognitions;
+      });
+
+      // setState(() {});
+    });
+
+    if (_recognitions != null && _recognitions!.isNotEmpty) {
+      setState(() {
+        output = _recognitions![0]['detectedClass'];
+
         isDetectingObjects = false;
-        final boundingBox = objects!.first.boundingBox;
+        final boundingBox = Rect.fromLTWH(
+            _recognitions![0]['rect']['x'],
+            _recognitions![0]['rect']['y'],
+            _recognitions![0]['rect']['w'],
+            _recognitions![0]['rect']['h']);
         zoomToDetectedObject(boundingBox);
         canStartStream = false;
         canAutoFocus = false;
@@ -325,7 +349,7 @@ class _CameraPageState extends State<CameraPage>
       setState(() {
         imagePaths.clear();
         allFileList.clear();
-        _imageFile = null;
+        _cameraImageFile = null;
       });
     }
 
@@ -333,11 +357,11 @@ class _CameraPageState extends State<CameraPage>
       final recentFile =
           fileNames.reduce((curr, next) => curr[0] > next[0] ? curr : next);
       String recentFileName = recentFile[1];
-      _imageFile = File('${directory.path}/$recentFileName');
+      _cameraImageFile = File('${directory.path}/$recentFileName');
       setState(() {
         imagePaths;
         allFileList;
-        _imageFile;
+        _cameraImageFile;
       });
     }
   }
@@ -367,251 +391,260 @@ class _CameraPageState extends State<CameraPage>
     return Scaffold(
       backgroundColor: Colors.black38,
       body: SingleChildScrollView(
-        child: _isCameraInitialized
-            ? Column(
-                children: [
-                  SafeArea(
-                    child: Stack(
-                      children: [
-                        Container(
-                          margin:
-                              const EdgeInsets.only(top: 10, left: 8, right: 8),
-                          width: double.infinity,
-                          height: MediaQuery.of(context).size.height * 0.75,
-                          child: CameraPreview(
-                            _cameraController!,
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTapDown: (details) => onViewFinderTap(details),
+        child: SafeArea(
+            child: _isCameraInitialized
+                ? Column(
+                    children: [
+                      Stack(
+                        children: [
+                          Container(
+                            margin: const EdgeInsets.only(
+                                top: 10, left: 8, right: 8),
+                            height: MediaQuery.of(context).size.height * 0.7,
+                            width: double.infinity,
+                            child: CameraPreview(
+                              _cameraController!,
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTapDown: (details) =>
+                                    onViewFinderTap(details),
+                              ),
                             ),
                           ),
-                        ),
-                        Visibility(
-                          visible: currentZoomLevel != 1.0 ||
-                                  exposeIcon != exposure[4][1]
-                              ? true
-                              : false,
-                          child: Positioned(
-                            bottom: MediaQuery.of(context).size.height * 0.0,
-                            left: MediaQuery.of(context).size.width * 0.37,
-                            right: MediaQuery.of(context).size.width * 0.37,
-                            child: ElevatedButton(
-                                style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.white),
-                                onPressed: () {
-                                  setState(() {
-                                    _cameraController!
-                                        .setZoomLevel(currentZoomLevel = 1.0);
-                                    currIconPosition = 4;
-                                    exposeIcon = exposure[currIconPosition][1];
-                                    _cameraController!.setExposureOffset(
-                                        exposure[currIconPosition][0]);
-                                  });
-                                },
-                                child: Text(
-                                  'Reset',
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .bodySmall!
-                                      .copyWith(color: Colors.black),
-                                )),
+                          Visibility(
+                            visible: currentZoomLevel != 1.0 ||
+                                    exposeIcon != exposure[4][1]
+                                ? true
+                                : false,
+                            child: Positioned(
+                              bottom: MediaQuery.of(context).size.height * 0.0,
+                              left: MediaQuery.of(context).size.width * 0.37,
+                              right: MediaQuery.of(context).size.width * 0.37,
+                              child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.white),
+                                  onPressed: () {
+                                    setState(() {
+                                      _cameraController!
+                                          .setZoomLevel(currentZoomLevel = 1.0);
+                                      currIconPosition = 4;
+                                      exposeIcon =
+                                          exposure[currIconPosition][1];
+                                      _cameraController!.setExposureOffset(
+                                          exposure[currIconPosition][0]);
+                                    });
+                                  },
+                                  child: Text(
+                                    'Reset',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodySmall!
+                                        .copyWith(color: Colors.black),
+                                  )),
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  SizedBox(
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: [
-                        GestureDetector(
-                          onDoubleTap: () {
-                            _animationControllerZoom.reset();
-                            _animationControllerZoom.forward();
-                            setState(() {
-                              currentZoomLevel = currentZoomLevel - 1;
-                              if (currentZoomLevel < 1) {
-                                currentZoomLevel = 1;
-                              }
-                              _cameraController!.setZoomLevel(currentZoomLevel);
-                            });
-                          },
-                          onTap: () {
-                            _animationControllerZoom.reset();
-                            _animationControllerZoom.forward();
-                            setState(() {
-                              currentZoomLevel = currentZoomLevel + 1;
-                              if (currentZoomLevel > maxZoom) {
-                                currentZoomLevel = 1;
-                              }
-                              _cameraController!.setZoomLevel(currentZoomLevel);
-                            });
-                          },
-                          child: AnimatedBuilder(
-                            animation: _animationZoom,
-                            builder: (BuildContext context, Widget? child) {
-                              return Transform.scale(
-                                scale: _animationZoom.value * 0.2 + 1,
-                                child: Text(
-                                  currentZoomLevel.toInt().toString() + "x",
-                                  style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 17,
-                                      fontWeight: FontWeight.bold),
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                        IconButton(
-                          onPressed: () async {
-                            setState(() {
-                              if (_currentFlashMode == FlashMode.off ||
-                                  _currentFlashMode == FlashMode.auto) {
-                                _currentFlashMode = FlashMode.torch;
-                                showSnackBar("Flash On");
-                              } else if (_currentFlashMode == FlashMode.torch) {
-                                _currentFlashMode = FlashMode.off;
-                                showSnackBar("Flash Off");
-                              }
-                            });
-
-                            await _cameraController!
-                                .setFlashMode(_currentFlashMode!);
-                          },
-                          icon: _currentFlashMode == FlashMode.off ||
-                                  _currentFlashMode == FlashMode.auto
-                              ? const Icon(Icons.flash_off_outlined)
-                              : const Icon(Icons.flash_on),
-                          color: Colors.white,
-                        ),
-                        IconButton(
-                            onPressed: () {
-                              var ele = exposure[
-                                  (currIconPosition + 1) % exposure.length];
-                              setState(() {
-                                exposeIcon = ele[1];
-                                currIconPosition = currIconPosition + 1;
-                              });
-                              _cameraController!.setExposureOffset(ele[0]);
-                            },
-                            icon: exposeIcon),
-                        IconButton(
-                            onPressed: () {
-                              _animationControllerFocus.reset();
-                              _animationControllerFocus.forward();
-                              if (!canStartStream) {
-                                showSnackBar("Focusing");
-                              }
-                              setState(() {
-                                canAutoFocus = !canAutoFocus;
-                                canStartStream = !canStartStream;
-                                startImageStream();
-                              });
-                            },
-                            icon: AnimatedBuilder(
-                                animation: _animationFocus,
+                        ],
+                      ),
+                      SizedBox(
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            GestureDetector(
+                              onDoubleTap: () {
+                                _animationControllerZoom.reset();
+                                _animationControllerZoom.forward();
+                                setState(() {
+                                  currentZoomLevel = currentZoomLevel - 1;
+                                  if (currentZoomLevel < 1) {
+                                    currentZoomLevel = 1;
+                                  }
+                                  _cameraController!
+                                      .setZoomLevel(currentZoomLevel);
+                                });
+                              },
+                              onTap: () {
+                                _animationControllerZoom.reset();
+                                _animationControllerZoom.forward();
+                                setState(() {
+                                  currentZoomLevel = currentZoomLevel + 1;
+                                  if (currentZoomLevel > maxZoom) {
+                                    currentZoomLevel = 1;
+                                  }
+                                  _cameraController!
+                                      .setZoomLevel(currentZoomLevel);
+                                });
+                              },
+                              child: AnimatedBuilder(
+                                animation: _animationZoom,
                                 builder: (BuildContext context, Widget? child) {
                                   return Transform.scale(
-                                    scale: _animationFocus.value * 0.1 + 1,
-                                    child: Icon(
-                                      canAutoFocus && canStartStream
-                                          ? Icons.center_focus_weak
-                                          : Icons.center_focus_weak_outlined,
-                                      color: canAutoFocus && canStartStream
-                                          ? Colors.green
-                                          : Colors.white,
+                                    scale: _animationZoom.value * 0.2 + 1,
+                                    child: Text(
+                                      currentZoomLevel.toInt().toString() + "x",
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 17,
+                                          fontWeight: FontWeight.bold),
                                     ),
                                   );
-                                })),
-                      ],
-                    ),
-                  ),
-                  SizedBox(
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        InkWell(
-                          onTap: () {
-                            setState(() {
-                              _isCameraInitialized = false;
-                            });
-                            initCamera(
-                              cameras[isRearCamera ? 1 : 0],
-                            );
-                            setState(() {
-                              isRearCamera = !isRearCamera;
-                            });
-                          },
-                          child: Container(
-                            width: 65,
-                            height: 65,
-                            decoration: BoxDecoration(
-                              color: Colors.black,
-                              shape: BoxShape.circle,
-                              border: Border.all(color: Colors.white, width: 1),
+                                },
+                              ),
                             ),
-                            child: Icon(
-                              isRearCamera
-                                  ? Icons.camera_rear
-                                  : Icons.camera_front,
+                            IconButton(
+                              onPressed: () async {
+                                setState(() {
+                                  if (_currentFlashMode == FlashMode.off ||
+                                      _currentFlashMode == FlashMode.auto) {
+                                    _currentFlashMode = FlashMode.torch;
+                                    showSnackBar("Flash On");
+                                  } else if (_currentFlashMode ==
+                                      FlashMode.torch) {
+                                    _currentFlashMode = FlashMode.off;
+                                    showSnackBar("Flash Off");
+                                  }
+                                });
+
+                                await _cameraController!
+                                    .setFlashMode(_currentFlashMode!);
+                              },
+                              icon: _currentFlashMode == FlashMode.off ||
+                                      _currentFlashMode == FlashMode.auto
+                                  ? const Icon(Icons.flash_off_outlined)
+                                  : const Icon(Icons.flash_on),
                               color: Colors.white,
                             ),
-                          ),
+                            IconButton(
+                                onPressed: () {
+                                  var ele = exposure[
+                                      (currIconPosition + 1) % exposure.length];
+                                  setState(() {
+                                    exposeIcon = ele[1];
+                                    currIconPosition = currIconPosition + 1;
+                                  });
+                                  _cameraController!.setExposureOffset(ele[0]);
+                                },
+                                icon: exposeIcon),
+                            IconButton(
+                                onPressed: () {
+                                  _animationControllerFocus.reset();
+                                  _animationControllerFocus.forward();
+                                  if (!canStartStream) {
+                                    showSnackBar("Detecting Objects");
+                                  }
+                                  setState(() {
+                                    canAutoFocus = !canAutoFocus;
+                                    canStartStream = !canStartStream;
+                                    startImageStream();
+                                  });
+                                },
+                                icon: AnimatedBuilder(
+                                    animation: _animationFocus,
+                                    builder:
+                                        (BuildContext context, Widget? child) {
+                                      return Transform.scale(
+                                        scale: _animationFocus.value * 0.1 + 1,
+                                        child: Icon(
+                                          canAutoFocus && canStartStream
+                                              ? Icons.center_focus_weak
+                                              : Icons
+                                                  .center_focus_weak_outlined,
+                                          color: canAutoFocus && canStartStream
+                                              ? Colors.green
+                                              : Colors.white,
+                                        ),
+                                      );
+                                    })),
+                          ],
                         ),
-                        GestureDetector(
-                          onTap: () {
-                            takePicture();
-                          },
-                          child: const Stack(
-                            alignment: Alignment.center,
-                            children: [
-                              Icon(
-                                Icons.circle,
-                                color: Color.fromARGB(45, 69, 68, 68),
-                                size: 100,
+                      ),
+                      SizedBox(
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          children: [
+                            InkWell(
+                              onTap: () {
+                                setState(() {
+                                  _isCameraInitialized = false;
+                                });
+                                initCamera(
+                                  cameras[isRearCamera ? 1 : 0],
+                                );
+                                setState(() {
+                                  loadModel();
+                                  isRearCamera = !isRearCamera;
+                                });
+                              },
+                              child: Container(
+                                width: 65,
+                                height: 65,
+                                decoration: BoxDecoration(
+                                  color: Colors.black,
+                                  shape: BoxShape.circle,
+                                  border:
+                                      Border.all(color: Colors.white, width: 1),
+                                ),
+                                child: Icon(
+                                  isRearCamera
+                                      ? Icons.camera_rear
+                                      : Icons.camera_front,
+                                  color: Colors.white,
+                                ),
                               ),
-                              Icon(
-                                Icons.circle_sharp,
-                                color: Color.fromARGB(255, 251, 250, 250),
-                                size: 80,
-                              ),
-                            ],
-                          ),
-                        ),
-                        GestureDetector(
-                          onTap: () async {
-                            refreshCapturedImages();
-                            Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                        builder: (context) => GalleryPage(
-                                            imagePaths: imagePaths)))
-                                .then((_) => refreshCapturedImages());
-                          },
-                          child: Container(
-                            width: 65,
-                            height: 65,
-                            decoration: BoxDecoration(
-                              color: Colors.black,
-                              shape: BoxShape.circle,
-                              border: Border.all(color: Colors.white, width: 2),
-                              image: _imageFile != null
-                                  ? DecorationImage(
-                                      image: FileImage(_imageFile!),
-                                      fit: BoxFit.cover,
-                                    )
-                                  : null,
                             ),
-                            child: Container(),
-                          ),
-                        )
-                      ],
-                    ),
-                  ),
-                ],
-              )
-            : Container(),
+                            GestureDetector(
+                              onTap: () {
+                                takePicture();
+                              },
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: const [
+                                  Icon(
+                                    Icons.circle,
+                                    color: Color.fromARGB(45, 69, 68, 68),
+                                    size: 100,
+                                  ),
+                                  Icon(
+                                    Icons.circle_sharp,
+                                    color: Color.fromARGB(255, 251, 250, 250),
+                                    size: 80,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            GestureDetector(
+                              onTap: () async {
+                                refreshCapturedImages();
+                                Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                            builder: (context) => GalleryPage(
+                                                imagePaths: imagePaths)))
+                                    .then((_) => refreshCapturedImages());
+                              },
+                              child: Container(
+                                width: 65,
+                                height: 65,
+                                decoration: BoxDecoration(
+                                  color: Colors.black,
+                                  shape: BoxShape.circle,
+                                  border:
+                                      Border.all(color: Colors.white, width: 2),
+                                  image: _cameraImageFile != null
+                                      ? DecorationImage(
+                                          image: FileImage(_cameraImageFile!),
+                                          fit: BoxFit.cover,
+                                        )
+                                      : null,
+                                ),
+                                child: Container(),
+                              ),
+                            )
+                          ],
+                        ),
+                      ),
+                    ],
+                  )
+                : Container()),
       ),
     );
   }
