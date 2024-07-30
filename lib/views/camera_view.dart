@@ -2,11 +2,14 @@ import 'dart:core';
 import 'dart:io';
 import 'dart:math';
 import 'package:camera/camera.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_tflite/flutter_tflite.dart';
 import 'package:google_ml_kit/google_ml_kit.dart';
+import 'package:intellizoom/views/bounding_box.dart';
 import 'package:intellizoom/views/view_pictures.dart';
 
 import 'package:path_provider/path_provider.dart';
@@ -31,13 +34,14 @@ class _CameraPageState extends State<CameraPage>
 
   String output = '';
   String label = '';
-  List? _recognitions = [];
+  List _recognitions = [];
   bool isRearCamera = true;
   double currentZoomLevel = 1.0;
   double maxZoom = 1.0;
   bool canStartStream = false;
   FlashMode? _currentFlashMode;
   File? _cameraImageFile;
+
   List<DetectedObject>? objects;
   int currIconPosition = -1;
   bool canAutoFocus = false;
@@ -50,11 +54,14 @@ class _CameraPageState extends State<CameraPage>
   late Animation<double> _animationFocus;
   late AnimationController _animationControllerZoom;
   late Animation<double> _animationZoom;
-
+  late double screenHeight;
+  late double screenWidth;
+  Map zoomLevels = {};
   @override
   void initState() {
     initCamera(cameras[0]);
     loadModel();
+
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
@@ -172,10 +179,12 @@ class _CameraPageState extends State<CameraPage>
           }
         } else if (!canStartStream) {
           _cameraController!.stopImageStream();
+          reset();
         }
       });
     } else {
       _cameraController!.stopImageStream();
+      reset();
     }
   }
 
@@ -215,34 +224,34 @@ class _CameraPageState extends State<CameraPage>
 
       // print(recognitions.runtimeType);   // List<Object?>
 
-      setState(() {
-        _recognitions = recognitions;
-      });
+      if (recognitions != null
+          // &&
+          //     recognitions[0]['rect']['x'] > 0.05 &&
+          //     recognitions[0]['rect']['y'] > 0.05
+          ) {
+        setState(() {
+          _recognitions = recognitions
+              .where((recognition) =>
+                  recognition['rect']['x'] > 0.05 &&
+                  recognition['rect']['y'] > 0.05 &&
+                  recognition['rect']['w'] < 0.8 &&
+                  recognition['rect']['h'] < 0.8)
+              .toList();
+        });
+      } else {
+        reset();
+      }
 
       // setState(() {});
     });
 
-    if (_recognitions != null && _recognitions!.isNotEmpty) {
-      setState(() {
-        output = _recognitions![0]['detectedClass'];
-
-        isDetectingObjects = false;
-        final boundingBox = Rect.fromLTWH(
-            _recognitions![0]['rect']['x'],
-            _recognitions![0]['rect']['y'],
-            _recognitions![0]['rect']['w'],
-            _recognitions![0]['rect']['h']);
-        zoomToDetectedObject(boundingBox);
-        canStartStream = false;
-        canAutoFocus = false;
-        objects;
-      });
-    } else {
+    if (_recognitions.isEmpty) {
       setState(() {
         output = "No Object detected";
         isDetectingObjects = false;
         canStartStream = true;
         canAutoFocus = true;
+        reset();
         objects;
       });
     }
@@ -251,8 +260,7 @@ class _CameraPageState extends State<CameraPage>
   void zoomToDetectedObject(Rect boundingBox) async {
     double objectHeight = boundingBox.height;
     double objectWidth = boundingBox.width;
-    double screenHeight = MediaQuery.of(context).size.height;
-    double screenWidth = MediaQuery.of(context).size.width;
+
     double minZoom = await _cameraController!.getMinZoomLevel();
     double maxZoom = await _cameraController!.getMaxZoomLevel();
     double currentZoom = currentZoomLevel;
@@ -281,6 +289,7 @@ class _CameraPageState extends State<CameraPage>
           await _cameraController!.setZoomLevel(newZoom);
           setState(() {
             currentZoomLevel = newZoom;
+            _recognitions = [];
           });
         });
       }
@@ -324,6 +333,40 @@ class _CameraPageState extends State<CameraPage>
       debugPrint('Error occured while taking picture: $e');
       return null;
     }
+  }
+
+  void reset() {
+    setState(() {
+      _cameraController!.setZoomLevel(currentZoomLevel = 1.0);
+      currIconPosition = 4;
+      exposeIcon = exposure[currIconPosition][1];
+      _cameraController!.setExposureOffset(exposure[currIconPosition][0]);
+      _recognitions = [];
+    });
+  }
+
+  void addZoomLevels(recognition, index) {
+    zoomLevels[index] = recognition;
+  }
+
+  void zoomToObject(index) {
+    print('function called');
+    final recognition = zoomLevels[index];
+    setState(() {
+      zoomLevels.clear();
+      output = recognition['detectedClass'];
+      canStartStream = false;
+      canAutoFocus = false;
+      isDetectingObjects = false;
+      final boundingBox = Rect.fromLTWH(
+          recognition['rect']['x'],
+          recognition['rect']['y'],
+          recognition['rect']['w'],
+          recognition['rect']['h']);
+      zoomToDetectedObject(boundingBox);
+
+      objects;
+    });
   }
 
   void refreshCapturedImages() async {
@@ -398,19 +441,90 @@ class _CameraPageState extends State<CameraPage>
                       Stack(
                         children: [
                           Container(
-                            margin: const EdgeInsets.only(
-                                top: 10, left: 8, right: 8),
-                            height: MediaQuery.of(context).size.height * 0.7,
-                            width: double.infinity,
-                            child: CameraPreview(
-                              _cameraController!,
-                              child: GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onTapDown: (details) =>
-                                    onViewFinderTap(details),
-                              ),
-                            ),
-                          ),
+                              margin: const EdgeInsets.only(
+                                  top: 10, left: 8, right: 8),
+                              height: MediaQuery.of(context).size.height * 0.7,
+                              width: double.infinity,
+                              child: LayoutBuilder(
+                                builder: (context, constraints) {
+                                  screenHeight = constraints.maxHeight;
+                                  screenWidth = constraints.maxWidth;
+                                  return CameraPreview(
+                                    _cameraController!,
+                                    child: Stack(
+                                      children: [
+                                        for (int i = 0; i < 3; i++)
+                                          if (i < _recognitions.length)
+                                            BorderBox(
+                                              recognition: _recognitions[i],
+                                              index: i,
+                                              constraints: constraints,
+                                              zoom: addZoomLevels,
+                                            ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              )),
+                          Visibility(
+                              visible: canAutoFocus && canStartStream,
+                              child: Positioned(
+                                bottom: 12,
+                                left: 0,
+                                right: 0,
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    if (_recognitions.isNotEmpty)
+                                      GestureDetector(
+                                        onTap: () {
+                                          zoomToObject(0);
+                                        },
+                                        child: Container(
+                                          width: 35,
+                                          height: 35,
+                                          decoration: const BoxDecoration(
+                                              color: Colors.orange,
+                                              shape: BoxShape.circle),
+                                        ),
+                                      ),
+                                    if (_recognitions.length > 1)
+                                      const SizedBox(
+                                        width: 20,
+                                      ),
+                                    if (_recognitions.length > 1)
+                                      GestureDetector(
+                                        onTap: () {
+                                          zoomToObject(1);
+                                        },
+                                        child: Container(
+                                          width: 35,
+                                          height: 35,
+                                          decoration: const BoxDecoration(
+                                              color: Colors.green,
+                                              shape: BoxShape.circle),
+                                        ),
+                                      ),
+                                    if (_recognitions.length > 2)
+                                      const SizedBox(
+                                        width: 20,
+                                      ),
+                                    if (_recognitions.length > 2)
+                                      GestureDetector(
+                                        onTap: () {
+                                          zoomToObject(2);
+                                        },
+                                        child: Container(
+                                          width: 35,
+                                          height: 35,
+                                          decoration: const BoxDecoration(
+                                              color: Colors.blue,
+                                              shape: BoxShape.circle),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              )),
                           Visibility(
                             visible: currentZoomLevel != 1.0 ||
                                     exposeIcon != exposure[4][1]
@@ -424,15 +538,7 @@ class _CameraPageState extends State<CameraPage>
                                   style: ElevatedButton.styleFrom(
                                       backgroundColor: Colors.white),
                                   onPressed: () {
-                                    setState(() {
-                                      _cameraController!
-                                          .setZoomLevel(currentZoomLevel = 1.0);
-                                      currIconPosition = 4;
-                                      exposeIcon =
-                                          exposure[currIconPosition][1];
-                                      _cameraController!.setExposureOffset(
-                                          exposure[currIconPosition][0]);
-                                    });
+                                    reset();
                                   },
                                   child: Text(
                                     'Reset',
@@ -595,9 +701,9 @@ class _CameraPageState extends State<CameraPage>
                               onTap: () {
                                 takePicture();
                               },
-                              child: Stack(
+                              child: const Stack(
                                 alignment: Alignment.center,
-                                children: const [
+                                children: [
                                   Icon(
                                     Icons.circle,
                                     color: Color.fromARGB(45, 69, 68, 68),
